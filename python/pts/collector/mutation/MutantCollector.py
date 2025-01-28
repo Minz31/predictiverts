@@ -12,8 +12,9 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 from xml.etree import ElementTree
 import sys
-
-from seutil import LoggingUtils, IOUtils, BashUtils, TimeUtils, GitHubUtils
+import json
+from seutil import IOUtils
+from seutil import LoggingUtils, BashUtils, TimeUtils, GitHubUtils
 from seutil.project import Project
 
 from pts.Environment import Environment
@@ -159,12 +160,12 @@ class MutantCollector:
         """
         cls.logger.info(f"Start to run mutation testing using PIT in {proj_dir}.")
         # first make sure the pit extension has been installed
-        with IOUtils.cd(f"{Macros.tools_dir}/pit-extension"):
+        with os.chdir(f"{Macros.tools_dir}/pit-extension"):
             BashUtils.run("mvn package && cp target/pit-extension-1.0-SNAPSHOT.jar ${M2_HOME}/lib/ext",
                           expected_return_code=0)
         try:
             # IOUtils.rm_dir(proj_dir / "target")
-            with IOUtils.cd(f"{proj_dir}"):
+            with os.chdir(f"{proj_dir}"):
                 BashUtils.run(f"mvn test")
                 BashUtils.run(f"mvn compile -DskipTests", expected_return_code=0)
                 BashUtils.run(f"mvn org.pitest:pitest-maven:mutationCoverage &> pit-log.txt", expected_return_code=0)
@@ -199,7 +200,7 @@ class MutantCollector:
                     reports = proj_dir/f"{proj}-default-mutation-report.json"
                 else:
                     reports = proj_dir/f"{proj}-all-mutation-report.json"
-                objs = IOUtils.load_json_stream(reports)
+                objs = json.load(open(reports, "r"))
                 cnt = 0
                 for i, mut in enumerate(objs):
                     # find the source file first
@@ -225,15 +226,19 @@ class MutantCollector:
                 self.logger.info(f"In total {cnt} mutants")
                 print(f"In total {cnt} mutants recovered in project {proj}.")
                 if binary:
-                    IOUtils.dump(proj_dir/"collector"/"mutant-data.json", proj_data)
+                    with open(proj_dir/"collector"/"mutant-data.json", 'w') as f:
+                        json.dump(proj_data, f)
                 else:
-                    IOUtils.dump(proj_dir / "collector" / "tri-mutant-data.json", proj_data)
+                    with open(proj_dir / "collector" / "tri-mutant-data.json", 'w') as f:
+                        json.dump(proj_data, f)
             except RuntimeError:
                 print(RuntimeError)
                 self.logger.info(f"Error occurred while recovering code changes")
                 self.logger.warning(f"Collection for project {proj} failed, error was: {traceback.format_exc()}")
             # end try
         # end for
+
+
 
     def extract_muts_w_changed_files(self, sha: str, default=True):
         """
@@ -277,7 +282,7 @@ class MutantCollector:
                             mut["id"] = cnt
                             proj_data.append(mut)
                             # first create a new repo
-                            with IOUtils.cd(f"{self.repos_downloads_dir}/{proj}"):
+                            with os.chdir()(f"{self.repos_downloads_dir}/{proj}"):
                                 BashUtils.run(f"git checkout master")
                                 BashUtils.run(f"git reset --hard {exp_sha}")
                                 BashUtils.run(f"git checkout -b mutation-{cnt} {exp_sha}")
@@ -297,7 +302,7 @@ class MutantCollector:
                     # end if
                 # end for
                 self.logger.info(f"In total {cnt} mutants")
-                IOUtils.dump(proj_dir / "collector" / "mutant-data.json", proj_data)
+                json.dump()(proj_dir / "collector" / "mutant-data.json", proj_data)
             except RuntimeError:
                 print(RuntimeError)
                 self.logger.info(f"Error occurred while recovering code changes")
@@ -323,7 +328,7 @@ class MutantCollector:
                 mut["old_code"] = old_code.rstrip()
                 mut["new_code"] = new_code.rstrip()
                 # first create a new repo
-                with IOUtils.cd(f"/tmp/tmp-{task_id}"):
+                with os.chdir() (f"/tmp/tmp-{task_id}"):
                     BashUtils.run(f"git checkout master")
                     BashUtils.run(f"git reset --hard {exp_sha}")
                     BashUtils.run(f"git checkout -b mutation-{cnt} {exp_sha}")
@@ -377,7 +382,7 @@ class MutantCollector:
             #         test_class_2_method_dict[m["class_name"]].append(m["id"])
             #     # end if
             # # end for
-            IOUtils.dump(self.result_dir / proj / "collector" / "test2method.json", test_class_2_method_dict)
+            json.dump()(self.result_dir / proj / "collector" / "test2method.json", test_class_2_method_dict)
         # end for
 
     def add_mutated_method_id(self, binary=False):
@@ -410,7 +415,7 @@ class MutantCollector:
                 tgt_file = "mutant-data.json"
             else:
                 tgt_file = "tri-mutant-data.json"
-            IOUtils.dump(self.result_dir / proj / "collector" / tgt_file, new_mutant_list)
+            json.dump()(self.result_dir / proj / "collector" / tgt_file, new_mutant_list)
         # end for
 
 
