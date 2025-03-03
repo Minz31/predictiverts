@@ -1,9 +1,13 @@
-from gensim.summarization.bm25 import BM25
+from rank_bm25 import BM25Okapi
 import string
 from seutil import BashUtils, IOUtils
 from typing import List
 from pts.main import Macros
-import javalang
+try:
+    import javalang
+except ModuleNotFoundError:
+    print("Warning: javalang not available; falling back to simple tokenization.")
+    javalang = None
 from functools import reduce
 from pts.models.TFIDFbaseline import get_tf_idf_query_similarity
 
@@ -15,16 +19,30 @@ def max_abs_normalize(scores):
 
 
 def getBM25sims(trainDocs, query):
-    bm25model = BM25([i.split() for i in trainDocs])
+    """
+    Given a list of training documents (as strings) and a query (as a string),
+    build a BM25 model using rank_bm25 and return the similarity scores as a list.
+    """
+    # Tokenize each document: BM25Okapi expects a list of token lists.
+    tokenized_corpus = [doc.split() for doc in trainDocs]
+    bm25model = BM25Okapi(tokenized_corpus)
+    # Tokenize the query
     sims = bm25model.get_scores(query.split())
-    return sims
+    return sims.tolist()  # Convert numpy array to list for JSON serialization
 
 
 def build_bm25_model(trainDocs):
-    return BM25([i.split() for i in trainDocs])
+    """
+    Given a list of training documents (as strings), build and return a BM25 model.
+    """
+    tokenized_corpus = [doc.split() for doc in trainDocs]
+    return BM25Okapi(tokenized_corpus)
 
 
 def tokenize(s):
+    """
+    Custom tokenization function that processes a string and returns a space-separated string of tokens.
+    """
     result = ""
     buffer = ""
     for word in s.split():
@@ -58,23 +76,28 @@ def parse_file(SHA: str, filepath: str):
     try:
         with open(filepath) as f:
             content = f.read().replace("\n", " ")
-            tokens = javalang.tokenizer.tokenize(content)
-            for i in tokens:
-                name = type(i).__name__
-                if name == 'Operator' or "Integer" in name or "Floating" in name or name == 'Separator':
-                    # print(name)
-                    continue
-                else:
-                    if i.value not in counter:
-                        counter[i.value] = 1
-                    else:
-                        counter[i.value] += 1
-
+            if javalang is not None:
+                try:
+                    tokens = javalang.tokenizer.tokenize(content)
+                    for token in tokens:
+                        name = type(token).__name__
+                        if name == 'Operator' or "Integer" in name or "Floating" in name or name == 'Separator':
+                            continue
+                        else:
+                            counter[token.value] = counter.get(token.value, 0) + 1
+                except Exception as e:
+                    print(f"Error tokenizing with javalang in {filepath}: {e}")
+                    # fallback to simple tokenization
+                    for token in content.split():
+                        counter[token] = counter.get(token, 0) + 1
+            else:
+                # Fallback if javalang isn't available
+                for token in content.split():
+                    counter[token] = counter.get(token, 0) + 1
     except Exception as e:
-        pass
-        # filepath does not exist in the SHA
-        #print(f"{SHA}, {filepath}, {e}")
-    return reduce((lambda x, key: (key + " ") * counter[key] + x), counter, "")
+        print(f"Error reading file {filepath}: {e}")
+    # Combine tokens into a string (each token repeated according to its count)
+    return reduce(lambda x, key: (key + " ") * counter[key] + x, counter, "")
 
 
 def pre_proecessing_for_each_sha(project, eval_data_item, subset="All"):
@@ -92,7 +115,7 @@ def pre_proecessing_for_each_sha(project, eval_data_item, subset="All"):
 
     project_folder = Macros.repos_downloads_dir / f"{project}"
     if not project_folder.exists():
-        BashUtils.run(f"git clone https://github.com/{project.replace('_', '/')} f{project_folder}")
+        BashUtils.run(f"git clone https://github.com/{project.replace('_', '/')} {project_folder}")
 
     test_content = {}
     change_content = {}
@@ -101,7 +124,6 @@ def pre_proecessing_for_each_sha(project, eval_data_item, subset="All"):
         for test in total_test_list:
             filepath = BashUtils.run(f"find . -name {test}.java").stdout
             if filepath == "":
-                # print(f"{test}.java does not exist")
                 continue
             if len(filepath.split("\n")) > 1:
                 filepath = filepath.split("\n")[0]
@@ -125,7 +147,7 @@ def pre_processing(project: str):
 
 
 def run_BM25_baseline_for_each_sha(eval_data_item, rule=False, subset="All"):
-    """Run BM25 baseline for the given SHA and return the results in the form of dictionary."""
+    """Run BM25 baseline for the given SHA and return the results in the form of a dictionary."""
     res_item = {}
     changed_files = eval_data_item["diff_per_file"].keys()
     failed_test_list = eval_data_item["failed_test_list"]
@@ -145,7 +167,10 @@ def run_BM25_baseline_for_each_sha(eval_data_item, rule=False, subset="All"):
         res_item["Ekstazi_labels"] = []
         res_item["STARTS_labels"] = []
         return res_item
-    trainDocs = [tokenize(eval_data_item["data_objects"].get(i, "")) for i in test_list]  # TEST
+
+    # Tokenize test file contents using the custom tokenize function.
+    trainDocs = [tokenize(eval_data_item["data_objects"].get(i, "")) for i in test_list]
+    # Combine and tokenize all query strings (changed files).
     query = tokenize(" ".join([eval_data_item["queries"].get(i, "") for i in changed_files]))
     BM25sims = getBM25sims(trainDocs, query)
 
@@ -153,23 +178,13 @@ def run_BM25_baseline_for_each_sha(eval_data_item, rule=False, subset="All"):
     starts_labels = []
     labels = []
     for test in test_list:
-        if test in eval_data_item["ekstazi_test_list"]:
-            ekstazi_labels.append(1)
-        else:
-            ekstazi_labels.append(0)
-        if test in eval_data_item["starts_test_list"]:
-            starts_labels.append(1)
-        else:
-            starts_labels.append(0)
-        if test in failed_test_list:
-            labels.append(1)
-        else:
-            labels.append(0)
+        ekstazi_labels.append(1 if test in eval_data_item["ekstazi_test_list"] else 0)
+        starts_labels.append(1 if test in eval_data_item["starts_test_list"] else 0)
+        labels.append(1 if test in failed_test_list else 0)
     res_item["labels"] = labels
     if rule:
         BM25sims = max_abs_normalize(BM25sims)
-        changed_classes = [t.split("/")[-1].replace(".java", "") for t in
-                           eval_data_item["diff_line_number_list_per_file"].keys()]
+        changed_classes = [t.split("/")[-1].replace(".java", "") for t in eval_data_item["diff_line_number_list_per_file"].keys()]
         modified_test_class = [t for t in changed_classes if "Test" in t]
         for index, t in enumerate(test_list):
             if t in modified_test_class:
@@ -182,9 +197,7 @@ def run_BM25_baseline_for_each_sha(eval_data_item, rule=False, subset="All"):
 
 
 def run_BM25_baseline(project: str):
-    # testDump, key is test name, value is a dict, "fail", "time", "doc"
-    processed_eval_data_json = IOUtils.load(
-        Macros.eval_data_dir / "mutated-eval-data" / f"{project}-ag-preprocessed.json")
+    processed_eval_data_json = IOUtils.load(Macros.eval_data_dir / "mutated-eval-data" / f"{project}-ag-preprocessed.json")
     res = []
     for eval_data_item in processed_eval_data_json:
         res_item = run_BM25_baseline_for_each_sha(eval_data_item)
@@ -194,14 +207,10 @@ def run_BM25_baseline(project: str):
     IOUtils.dump(output_dir / "per-sha-result.json", res, IOUtils.Format.jsonPretty)
 
 
-# Code for getting BM25 for training data (mutants)
-# Step1: first get the contents of files for the training sha
 def pre_proecessing_for_training_sha(project, changed_file_list: List[str]):
     """
-    Extract the contents for the PIT tool mutants, test files' contents, source files' contents.
-    param: name of the project
-    param: a list of all mutated files' paths
-    return a dict of file => contents
+    Extract the contents for the PIT tool mutants, test files' contents, and source files' contents.
+    Returns a dictionary mapping file paths to their contents.
     """
     from pts.main import proj_logs
     training_SHA = proj_logs[project]
@@ -211,12 +220,12 @@ def pre_proecessing_for_training_sha(project, changed_file_list: List[str]):
     if (collected_results_dir / "method-data.json").exists():
         test_class_2_methods = IOUtils.load(collected_results_dir / "test2meth.json")
     else:
-        raise FileNotFoundError("Can not find test2meth.json.")
+        raise FileNotFoundError("Cannot find test2meth.json.")
     total_test_list = list(test_class_2_methods.keys())
 
     project_folder = Macros.repos_downloads_dir / f"{project}"
     if not project_folder.exists():
-        BashUtils.run(f"git clone https://github.com/{project.replace('_', '/')} f{project_folder}")
+        BashUtils.run(f"git clone https://github.com/{project.replace('_', '/')} {project_folder}")
 
     test_content = {}
     change_content = {}
@@ -237,14 +246,7 @@ def pre_proecessing_for_training_sha(project, changed_file_list: List[str]):
     return data_item
 
 
-# Step2: get documents and queries for the training mutants
 def get_BM25_score(data_item, changed_file: str, bm25_model):
-    """
-    Given the name of the tests and the changed file path, from the pre-processed data items,
-    the BM25 scores will be returned.
-    """
-
     query = tokenize(data_item["queries"].get(changed_file, ""))
     BM25sims = bm25_model.get_scores(query.split())
-
     return BM25sims

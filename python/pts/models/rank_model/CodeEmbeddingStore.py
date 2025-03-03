@@ -1,6 +1,5 @@
 import argparse
 from collections import Counter, defaultdict
-from dpu_utils.mlutils import Vocabulary
 import heapq
 import json
 import logging
@@ -11,6 +10,69 @@ import sys
 import torch
 from torch import nn
 from pts.data.diff_utils import get_edit_keywords
+
+# --- Begin Dummy Vocabulary Fallback ---
+try:
+    from dpu_utils.mlutils import Vocabulary
+except ModuleNotFoundError:
+    print("Warning: dpu_utils.mlutils.Vocabulary not available; using dummy Vocabulary.")
+    class Vocabulary:
+        PAD = "<PAD>"
+        UNK = "<UNK>"
+        
+        @staticmethod
+        def get_pad():
+            return Vocabulary.PAD
+
+        @staticmethod
+        def get_unk():
+            return Vocabulary.UNK
+
+        @staticmethod
+        def create_vocabulary(tokens, max_size, count_threshold, add_pad):
+            vocab = Vocabulary()
+            vocab.token2id = {}
+            vocab.id2token = {}
+            if add_pad:
+                vocab.token2id[Vocabulary.PAD] = 0
+                vocab.id2token[0] = Vocabulary.PAD
+            # Always add UNK
+            vocab.token2id[Vocabulary.UNK] = len(vocab.token2id)
+            vocab.id2token[len(vocab.token2id)-1] = Vocabulary.UNK
+            # Sort tokens by frequency (descending) then alphabetically
+            sorted_tokens = sorted(tokens.items(), key=lambda x: (-x[1], x[0]))
+            for token, count in sorted_tokens:
+                if count < count_threshold:
+                    continue
+                if len(vocab.token2id) >= max_size:
+                    break
+                if token in vocab.token2id:
+                    continue
+                vocab.token2id[token] = len(vocab.token2id)
+                vocab.id2token[len(vocab.token2id)-1] = token
+            return vocab
+
+        def get_id_or_unk(self, token):
+            return self.token2id.get(token, self.token2id.get(Vocabulary.UNK))
+
+        def get_id_or_unk_multiple(self, tokens, pad_to_size, padding_element):
+            ids = [self.get_id_or_unk(token) for token in tokens]
+            if len(ids) < pad_to_size:
+                ids.extend([padding_element] * (pad_to_size - len(ids)))
+            else:
+                ids = ids[:pad_to_size]
+            return ids
+
+        def get_name_for_id(self, idx):
+            return self.id2token.get(idx, Vocabulary.UNK)
+
+        def __len__(self):
+            return len(self.token2id)
+
+        @property
+        def id_to_token(self):
+            return self.id2token
+# --- End Dummy Vocabulary Fallback ---
 
 
 START = '<sos>'
@@ -50,18 +112,16 @@ class CodeEmbeddingStore(nn.Module):
 
         code_weights_matrix = np.zeros((len(self.__code_vocabulary), CODE_EMBEDDING_SIZE))
         code_word_count = 0
-        for i, word in enumerate(self.__code_vocabulary.id_to_token):
+        # Note: using id2token from our dummy or dpu_utils Vocabulary.
+        for i, word in enumerate(self.__code_vocabulary.id_to_token.values()):
             try:
                 code_weights_matrix[i] = code_embeddings[word]
                 code_word_count += 1
             except KeyError:
                 if self.static:
-                    # in static mode, use the %UNK% embedding
-                    code_weights_matrix[i] = code_embeddings["%UNK%"]
+                    code_weights_matrix[i] = code_embeddings.get("%UNK%", np.zeros((CODE_EMBEDDING_SIZE,)))
                 else:
-                    # in non-static mode, initialize a random embedding
                     code_weights_matrix[i] = np.random.normal(scale=0.6, size=(CODE_EMBEDDING_SIZE,))
-
         self.__code_embedding_layer.weight = torch.nn.Parameter(torch.FloatTensor(code_weights_matrix),
                                                                 requires_grad=(not self.static))
 

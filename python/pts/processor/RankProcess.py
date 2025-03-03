@@ -179,7 +179,8 @@ class RankProcessor:
                     for positive_test in killed_test_set:
                         pos_test_input = SubTokenizer.sub_tokenize_java_like(positive_test)
                         sample_size = min(len(lived_test_class), 20)  # predefined maximum living test classes
-                        sampled_lived_test_class = sample(lived_test_class, sample_size)
+                        sampled_lived_test_class = sample(sorted(lived_test_class), sample_size)
+
                         for negative_test in sampled_lived_test_class:
                             neg_test_input = SubTokenizer.sub_tokenize_java_like(negative_test)
                             # diff_input = SubTokenizer.sub_tokenize_java_like(
